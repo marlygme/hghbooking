@@ -60,9 +60,17 @@ The backend follows a RESTful API pattern with the following endpoints:
 
 **Authentication:**
 - Simple session-based authentication for admin users
-- Sessions stored in-memory Map (production would use Redis or database-backed sessions)
 - Session ID transmitted via custom `x-session-id` header
 - Default admin credentials: username "admin", password "admin123" (created on first run)
+
+**SECURITY NOTES (Production Deployment):**
+Before production deployment, the following security improvements MUST be implemented:
+1. Password Hashing: Replace plaintext password storage with bcrypt hashing
+2. Session Storage: Move from in-memory Map to Redis or database-backed persistent sessions
+3. Session Expiry: Implement automatic session expiration (e.g., 24 hours)
+4. HTTPS: Ensure all traffic is encrypted
+5. Rate Limiting: Add rate limiting on login and booking creation endpoints
+6. Cookie-based Auth: Consider moving from header-based to secure HTTP-only cookies
 
 **Data Validation:**
 - Zod schemas defined in shared directory for type safety across client/server
