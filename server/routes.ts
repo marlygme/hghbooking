@@ -1,16 +1,191 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { insertBookingRequestSchema, updateBookingStatusSchema } from "@shared/schema";
+import { z } from "zod";
+
+// Simple session storage (in production, use proper session management)
+const sessions: Map<string, { adminId: string; expiresAt: Date }> = new Map();
+
+function generateSessionId(): string {
+  return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
+
+function isAuthenticated(sessionId: string | undefined): boolean {
+  if (!sessionId) return false;
+  const session = sessions.get(sessionId);
+  if (!session) return false;
+  if (new Date() > session.expiresAt) {
+    sessions.delete(sessionId);
+    return false;
+  }
+  return true;
+}
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // put application routes here
-  // prefix all routes with /api
+  
+  // Initialize default admin account if not exists
+  const existingAdmin = await storage.getAdminByUsername("admin");
+  if (!existingAdmin) {
+    await storage.createAdmin({
+      username: "admin",
+      password: "admin123", // In production, hash this password
+    });
+    console.log("Default admin account created: admin / admin123");
+  }
 
-  // use storage to perform CRUD operations on the storage interface
-  // e.g. storage.insertUser(user) or storage.getUserByUsername(username)
+  // ===== BOOKING ROUTES =====
+  
+  // Create a new booking request
+  app.post("/api/bookings", async (req, res) => {
+    try {
+      const validatedData = insertBookingRequestSchema.parse(req.body);
+      const booking = await storage.createBooking(validatedData);
+      
+      // In production, send confirmation email here
+      console.log(`New booking request from ${booking.name} (${booking.email})`);
+      
+      res.status(201).json(booking);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ message: "Invalid booking data", errors: error.errors });
+      } else {
+        console.error("Error creating booking:", error);
+        res.status(500).json({ message: "Failed to create booking request" });
+      }
+    }
+  });
+
+  // Get all bookings (admin only)
+  app.get("/api/bookings", async (req, res) => {
+    const sessionId = req.headers["x-session-id"] as string;
+    
+    if (!isAuthenticated(sessionId)) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const bookings = await storage.getBookings();
+      res.json(bookings);
+    } catch (error) {
+      console.error("Error fetching bookings:", error);
+      res.status(500).json({ message: "Failed to fetch bookings" });
+    }
+  });
+
+  // Get single booking by ID
+  app.get("/api/bookings/:id", async (req, res) => {
+    const sessionId = req.headers["x-session-id"] as string;
+    
+    if (!isAuthenticated(sessionId)) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const booking = await storage.getBookingById(req.params.id);
+      if (!booking) {
+        return res.status(404).json({ message: "Booking not found" });
+      }
+      res.json(booking);
+    } catch (error) {
+      console.error("Error fetching booking:", error);
+      res.status(500).json({ message: "Failed to fetch booking" });
+    }
+  });
+
+  // Update booking status (admin only)
+  app.patch("/api/bookings/:id/status", async (req, res) => {
+    const sessionId = req.headers["x-session-id"] as string;
+    
+    if (!isAuthenticated(sessionId)) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+      const validatedData = updateBookingStatusSchema.parse(req.body);
+      const booking = await storage.updateBookingStatus(
+        req.params.id,
+        validatedData.status,
+        validatedData.adminNotes
+      );
+
+      if (!booking) {
+        return res.status(404).json({ message: "Booking not found" });
+      }
+
+      // In production, send status update email here
+      console.log(`Booking ${booking.id} status updated to ${booking.status}`);
+      console.log(`Email would be sent to: ${booking.email}`);
+
+      res.json(booking);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ message: "Invalid status data", errors: error.errors });
+      } else {
+        console.error("Error updating booking status:", error);
+        res.status(500).json({ message: "Failed to update booking status" });
+      }
+    }
+  });
+
+  // ===== ADMIN ROUTES =====
+  
+  // Admin login
+  app.post("/api/admin/login", async (req, res) => {
+    try {
+      const { username, password } = req.body;
+
+      if (!username || !password) {
+        return res.status(400).json({ message: "Username and password required" });
+      }
+
+      const admin = await storage.getAdminByUsername(username);
+      
+      if (!admin || admin.password !== password) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+
+      // Create session
+      const sessionId = generateSessionId();
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+      sessions.set(sessionId, { adminId: admin.id, expiresAt });
+
+      res.json({ 
+        message: "Login successful", 
+        sessionId,
+        admin: { id: admin.id, username: admin.username }
+      });
+    } catch (error) {
+      console.error("Error during login:", error);
+      res.status(500).json({ message: "Login failed" });
+    }
+  });
+
+  // Admin logout
+  app.post("/api/admin/logout", async (req, res) => {
+    const sessionId = req.headers["x-session-id"] as string;
+    
+    if (sessionId) {
+      sessions.delete(sessionId);
+    }
+
+    res.json({ message: "Logged out successfully" });
+  });
+
+  // Check auth status
+  app.get("/api/admin/me", async (req, res) => {
+    const sessionId = req.headers["x-session-id"] as string;
+    
+    if (!isAuthenticated(sessionId)) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+
+    const session = sessions.get(sessionId);
+    res.json({ authenticated: true, adminId: session?.adminId });
+  });
 
   return httpServer;
 }
