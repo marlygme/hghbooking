@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertBookingRequestSchema, updateBookingStatusSchema } from "@shared/schema";
+import { insertBookingRequestSchema, updateBookingStatusSchema, checkConflictsSchema } from "@shared/schema";
 import { z } from "zod";
 
 // Simple session storage (in production, use proper session management)
@@ -128,6 +128,76 @@ export async function registerRoutes(
         console.error("Error updating booking status:", error);
         res.status(500).json({ message: "Failed to update booking status" });
       }
+    }
+  });
+
+  // Check for conflicts (public endpoint for validation before submission)
+  app.post("/api/bookings/check-conflicts", async (req, res) => {
+    try {
+      const validatedData = checkConflictsSchema.parse(req.body);
+      const { bookingDate, timeSlots, pitchType, excludeBookingId } = validatedData;
+
+      const conflicts = await storage.checkConflicts(bookingDate, timeSlots, pitchType, excludeBookingId);
+      res.json(conflicts);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ message: "Invalid request data", errors: error.errors });
+      } else {
+        console.error("Error checking conflicts:", error);
+        res.status(500).json({ message: "Failed to check conflicts" });
+      }
+    }
+  });
+
+  // Get availability for a specific date (public endpoint for showing taken slots)
+  app.get("/api/availability/:date", async (req, res) => {
+    try {
+      const { date } = req.params;
+      
+      // Validate date format (YYYY-MM-DD)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ message: "Invalid date format. Use YYYY-MM-DD" });
+      }
+
+      // Get approved bookings for this date
+      const approvedBookings = await storage.getApprovedBookingsByDate(date);
+      
+      // Get pending bookings too for visibility (user can see slots that may be taken)
+      const pendingBookings = await storage.getBookingsByDateAndStatus(date, "pending");
+      
+      // Extract taken slots with pitch type and status info
+      const takenSlots: { timeSlot: string; pitchType: string; status: string }[] = [];
+      
+      for (const booking of approvedBookings) {
+        for (const slot of booking.timeSlots) {
+          takenSlots.push({
+            timeSlot: slot,
+            pitchType: booking.pitchType,
+            status: "approved",
+          });
+        }
+      }
+      
+      // Add pending slots (these are not confirmed but show potential conflicts)
+      for (const booking of pendingBookings) {
+        for (const slot of booking.timeSlots) {
+          takenSlots.push({
+            timeSlot: slot,
+            pitchType: booking.pitchType,
+            status: "pending",
+          });
+        }
+      }
+
+      res.json({
+        date,
+        takenSlots,
+        approvedBookingsCount: approvedBookings.length,
+        pendingBookingsCount: pendingBookings.length,
+      });
+    } catch (error) {
+      console.error("Error fetching availability:", error);
+      res.status(500).json({ message: "Failed to fetch availability" });
     }
   });
 

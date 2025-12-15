@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { z } from "zod";
 import { format, addDays, isBefore, startOfDay } from "date-fns";
@@ -70,6 +70,13 @@ const STEPS = [
   { id: 4, title: "Review", icon: ClipboardCheck },
 ];
 
+interface AvailabilityData {
+  date: string;
+  takenSlots: { timeSlot: string; pitchType: string; status: string }[];
+  approvedBookingsCount: number;
+  pendingBookingsCount: number;
+}
+
 export default function BookingPage() {
   const [step, setStep] = useState(1);
   const [, setLocation] = useLocation();
@@ -90,6 +97,35 @@ export default function BookingPage() {
       frequency: "one_off",
     },
   });
+
+  const selectedDate = form.watch("bookingDate");
+  const selectedPitchType = form.watch("pitchType");
+
+  // Fetch availability when date changes
+  const { data: availability, isLoading: isLoadingAvailability } = useQuery<AvailabilityData>({
+    queryKey: ["/api/availability", selectedDate],
+    enabled: !!selectedDate,
+  });
+
+  // Clear selected time slots that conflict with APPROVED bookings when date or availability changes
+  useEffect(() => {
+    if (availability && selectedDate) {
+      const currentSlots = form.getValues("timeSlots");
+      const conflictingSlots = currentSlots.filter((slot) => {
+        // Only consider approved bookings as hard conflicts - pending are just warnings
+        const approved = availability.takenSlots.find((t) => t.timeSlot === slot && t.status === "approved");
+        if (approved) {
+          return approved.pitchType === "full_pitch" || selectedPitchType === "full_pitch" || approved.pitchType === selectedPitchType;
+        }
+        return false;
+      });
+      
+      if (conflictingSlots.length > 0) {
+        const validSlots = currentSlots.filter((slot) => !conflictingSlots.includes(slot));
+        form.setValue("timeSlots", validSlots);
+      }
+    }
+  }, [availability, selectedDate, selectedPitchType, form]);
 
   const submitMutation = useMutation({
     mutationFn: async (data: InsertBookingRequest) => {
@@ -524,6 +560,26 @@ export default function BookingPage() {
                 <div className="space-y-6">
                   <div>
                     <Label className="text-sm font-medium mb-3 block">Select Time Slots</Label>
+                    {selectedDate && (
+                      <div className="flex items-center gap-4 text-xs mb-3 flex-wrap">
+                        <div className="flex items-center gap-1">
+                          <div className="w-3 h-3 rounded bg-muted" />
+                          <span className="text-muted-foreground">Available</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <div className="w-3 h-3 rounded bg-destructive/40" />
+                          <span className="text-muted-foreground">Confirmed</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <div className="w-3 h-3 rounded bg-amber-500/40" />
+                          <span className="text-muted-foreground">Pending</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <div className="w-3 h-3 rounded bg-primary" />
+                          <span className="text-muted-foreground">Your selection</span>
+                        </div>
+                      </div>
+                    )}
                     <FormField
                       control={form.control}
                       name="timeSlots"
@@ -533,11 +589,28 @@ export default function BookingPage() {
                             <div className="grid grid-cols-4 gap-2 max-h-64 overflow-y-auto p-1">
                               {TIME_SLOTS.map((slot) => {
                                 const isSelected = field.value.includes(slot);
+                                // Find bookings for this slot - approved blocks, pending just shows warning
+                                const approvedBooking = availability?.takenSlots.find((t) => t.timeSlot === slot && t.status === "approved");
+                                const pendingBooking = availability?.takenSlots.find((t) => t.timeSlot === slot && t.status === "pending");
+                                const hasPending = !approvedBooking && !!pendingBooking;
+                                
+                                // Only APPROVED bookings block the slot - pending just shows warning
+                                const isBlocked = approvedBooking && (
+                                  approvedBooking.pitchType === "full_pitch" || 
+                                  selectedPitchType === "full_pitch" || 
+                                  approvedBooking.pitchType === selectedPitchType
+                                );
+
+                                // Disable if: no date selected, loading availability, or slot is blocked by approved booking
+                                const isDisabled = !selectedDate || isLoadingAvailability || isBlocked;
+                                
                                 return (
                                   <button
                                     key={slot}
                                     type="button"
+                                    disabled={isDisabled}
                                     onClick={() => {
+                                      if (isDisabled) return;
                                       if (isSelected) {
                                         field.onChange(field.value.filter((s) => s !== slot));
                                       } else {
@@ -545,11 +618,20 @@ export default function BookingPage() {
                                       }
                                     }}
                                     className={`px-3 py-2 text-sm rounded-md transition-all ${
-                                      isSelected
+                                      !selectedDate
+                                        ? "bg-muted/30 text-muted-foreground/30 cursor-not-allowed"
+                                        : isLoadingAvailability
+                                        ? "bg-muted/50 text-muted-foreground/50 cursor-wait"
+                                        : isBlocked
+                                        ? "bg-destructive/40 text-destructive-foreground/50 cursor-not-allowed line-through"
+                                        : isSelected
                                         ? "bg-primary text-primary-foreground"
+                                        : hasPending
+                                        ? "bg-amber-500/40 text-amber-900 dark:text-amber-200 hover-elevate"
                                         : "bg-muted text-muted-foreground hover-elevate"
                                     }`}
                                     data-testid={`timeslot-${slot.replace(":", "")}`}
+                                    title={isBlocked ? `Already booked (${approvedBooking?.pitchType === "full_pitch" ? "Full Pitch" : "Single Court"})` : hasPending ? `Pending request - may conflict (${pendingBooking?.pitchType === "full_pitch" ? "Full Pitch" : "Single Court"})` : undefined}
                                   >
                                     {slot}
                                   </button>
@@ -558,6 +640,11 @@ export default function BookingPage() {
                             </div>
                           </FormControl>
                           <FormMessage />
+                          {isLoadingAvailability && selectedDate && (
+                            <p className="text-sm text-muted-foreground mt-2">
+                              Loading availability...
+                            </p>
+                          )}
                           {field.value.length > 0 && (
                             <p className="text-sm text-muted-foreground mt-2">
                               Selected: {field.value.join(", ")}

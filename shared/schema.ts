@@ -58,6 +58,13 @@ export const updateBookingStatusSchema = z.object({
   adminNotes: z.string().optional(),
 });
 
+export const checkConflictsSchema = z.object({
+  bookingDate: z.string().min(1, "Please select a date"),
+  timeSlots: z.array(z.string()).min(1, "Please select at least one time slot"),
+  pitchType: z.enum(["single_court", "full_pitch"]),
+  excludeBookingId: z.string().optional(),
+});
+
 export type InsertBookingRequest = z.infer<typeof insertBookingRequestSchema>;
 export type BookingRequest = typeof bookingRequests.$inferSelect;
 export type InsertAdmin = z.infer<typeof insertAdminSchema>;
